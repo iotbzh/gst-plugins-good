@@ -73,7 +73,11 @@ enum
 {
   PROP_0,
   V4L2_STD_OBJECT_PROPS,
-  PROP_LAST
+  PROP_LAST,
+  PROP_CROP_TOP,
+  PROP_CROP_LEFT,
+  PROP_CROP_WIDTH,
+  PROP_CROP_HEIGHT
 };
 
 /* signals and args */
@@ -102,6 +106,7 @@ G_DEFINE_TYPE_WITH_CODE (GstV4l2Src, gst_v4l2src, GST_TYPE_PUSH_SRC,
         gst_v4l2src_video_orientation_interface_init));
 
 static void gst_v4l2src_finalize (GstV4l2Src * v4l2src);
+static gboolean gst_v4l2src_set_crop (GstV4l2Src * src);
 
 /* element methods */
 static GstStateChangeReturn gst_v4l2src_change_state (GstElement * element,
@@ -147,6 +152,26 @@ gst_v4l2src_class_init (GstV4l2SrcClass * klass)
 
   gst_v4l2_object_install_properties_helper (gobject_class,
       DEFAULT_PROP_DEVICE);
+
+  /*
+   * Crop options
+   */
+  g_object_class_install_property (gobject_class, PROP_CROP_TOP,
+      g_param_spec_int ("crop-top", "Vertical offset",
+          "The top corner of the CROP area ", 0, G_MAXINT, 0,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_CROP_LEFT,
+      g_param_spec_int ("crop-left", " Horizontal offset",
+          "The left corner of the CROP area ", 0, G_MAXINT, 0,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_CROP_WIDTH,
+      g_param_spec_int ("crop-width", "Width size",
+          "Width of the CROP area. 0: Equal with input width",
+          0, G_MAXINT, 0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_CROP_HEIGHT,
+      g_param_spec_int ("crop-height", "Height size",
+          "Height of the CROP area. 0: Equal with input height",
+          0, G_MAXINT, 0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   /**
    * GstV4l2Src::prepare-format:
@@ -227,6 +252,18 @@ gst_v4l2src_set_property (GObject * object,
   if (!gst_v4l2_object_set_property_helper (v4l2src->v4l2object,
           prop_id, value, pspec)) {
     switch (prop_id) {
+      case PROP_CROP_TOP:
+        v4l2src->crop.top = g_value_get_int (value);
+        break;
+      case PROP_CROP_LEFT:
+        v4l2src->crop.left = g_value_get_int (value);
+        break;
+      case PROP_CROP_WIDTH:
+        v4l2src->crop.width = g_value_get_int (value);
+        break;
+      case PROP_CROP_HEIGHT:
+        v4l2src->crop.height = g_value_get_int (value);
+        break;
       default:
         G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
         break;
@@ -243,6 +280,18 @@ gst_v4l2src_get_property (GObject * object,
   if (!gst_v4l2_object_get_property_helper (v4l2src->v4l2object,
           prop_id, value, pspec)) {
     switch (prop_id) {
+      case PROP_CROP_TOP:
+        g_value_set_int (value, v4l2src->crop.top);
+        break;
+      case PROP_CROP_LEFT:
+        g_value_set_int (value, v4l2src->crop.left);
+        break;
+      case PROP_CROP_WIDTH:
+        g_value_set_int (value, v4l2src->crop.width);
+        break;
+      case PROP_CROP_HEIGHT:
+        g_value_set_int (value, v4l2src->crop.height);
+        break;
       default:
         G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
         break;
@@ -386,6 +435,11 @@ gst_v4l2src_set_format (GstV4l2Src * v4l2src, GstCaps * caps,
 
   g_signal_emit (v4l2src, gst_v4l2_signals[SIGNAL_PRE_SET_FORMAT], 0,
       v4l2src->v4l2object->video_fd, caps);
+
+  /* Care about crop if driver has supported capability of crop (CROPCAP) */
+  if ((v4l2src->in_size.width > 0) && (v4l2src->in_size.height > 0)) {
+    gst_v4l2src_set_crop (v4l2src);
+  }
 
   return gst_v4l2_object_set_format (obj, caps, error);
 }
@@ -621,6 +675,38 @@ gst_v4l2src_get_caps (GstBaseSrc * src, GstCaps * filter)
   }
 
   return gst_v4l2_object_get_caps (obj, filter);
+}
+
+static gboolean
+gst_v4l2src_set_crop (GstV4l2Src * src)
+{
+  GstV4l2Object *obj;
+  struct v4l2_crop crop;
+
+  obj = src->v4l2object;
+
+  memset (&crop, 0, sizeof (crop));
+  crop.type = obj->type;
+
+  if (src->crop.width == 0)
+    src->crop.width = src->in_size.width;
+
+  if (src->crop.height == 0)
+    src->crop.height = src->in_size.height;
+
+  crop.c.top = src->crop.top;
+  crop.c.left = src->crop.left;
+  crop.c.width = src->crop.width;
+  crop.c.height = src->crop.height;
+
+  if (obj->ioctl (src->v4l2object->video_fd, VIDIOC_S_CROP, &crop) < 0) {
+    GST_ERROR_OBJECT (src, "Fail to set crop");
+    return FALSE;
+  }
+  GST_DEBUG_OBJECT (src,
+      "crop image: crop top %d crop left %d crop width %d crop height %d",
+      crop.c.top, crop.c.left, crop.c.width, crop.c.height);
+  return TRUE;
 }
 
 static gboolean
