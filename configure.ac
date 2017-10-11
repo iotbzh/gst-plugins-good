@@ -336,6 +336,17 @@ AG_GST_SET_PACKAGE_RELEASE_DATETIME_WITH_NANO([$PACKAGE_VERSION_NANO],
   ["${srcdir}/gst-plugins-good.doap"],
   [$PACKAGE_VERSION_MAJOR.$PACKAGE_VERSION_MINOR.$PACKAGE_VERSION_MICRO])
 
+dnl check for continuous frame capture mode
+AC_ARG_ENABLE([cont-frame-capture],
+             [AS_HELP_STRING([--enable-cont-frame-capture],
+                             [Enable continuous frame capture mode])],
+             [enable_cont_fr_capture=yes],
+             []
+             )
+if test "x${enable_cont_fr_capture}" = "xyes"; then
+  AC_DEFINE(CONT_FRAME_CAPTURE, 1, [Define if you enable option --enable-cont-frame-capture])
+fi
+
 # set by AG_GST_PARSE_SUBSYSTEM_DISABLES above
 dnl make sure it doesn't complain about unused variables if debugging is disabled
 NO_WARNINGS=""
