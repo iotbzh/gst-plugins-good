@@ -347,6 +347,12 @@ if test "x${enable_cont_fr_capture}" = "xyes"; then
   AC_DEFINE(CONT_FRAME_CAPTURE, 1, [Define if you enable option --enable-cont-frame-capture])
 fi
 
+dnl check mmngrbuf library to use dmabuf exporter
+AC_CHECK_LIB([mmngrbuf], [mmngr_export_start_in_user],
+  [AC_DEFINE(HAVE_MMNGRBUF, 1, [Define if you have mmngrbuf library])
+     GST_LIBS="$GST_LIBS -lmmngrbuf"
+  ])
+
 # set by AG_GST_PARSE_SUBSYSTEM_DISABLES above
 dnl make sure it doesn't complain about unused variables if debugging is disabled
 NO_WARNINGS=""

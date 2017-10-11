@@ -942,6 +942,7 @@ gst_v4l2src_create (GstPushSrc * src, GstBuffer ** buf)
   GstClockTime abs_time, base_time, timestamp, duration;
   GstClockTime delay;
   GstMessage *qos_msg;
+  GstBuffer **buf_v4l2 = buf;
 
   do {
     ret = GST_BASE_SRC_CLASS (parent_class)->alloc (GST_BASE_SRC (src), 0,
@@ -950,7 +951,19 @@ gst_v4l2src_create (GstPushSrc * src, GstBuffer ** buf)
     if (G_UNLIKELY (ret != GST_FLOW_OK))
       goto alloc_failed;
 
-    ret = gst_v4l2_buffer_pool_process (pool, buf);
+#ifdef HAVE_MMNGRBUF
+    if (GST_IS_V4L2_MMNGR_BUFFER_POOL (obj->pool)) {
+      GstParentBufferMeta *meta;
+
+      meta = gst_buffer_get_parent_buffer_meta (*buf);
+      if (!meta)
+        goto alloc_failed;
+
+      buf_v4l2 = &meta->buffer;
+    }
+#endif
+
+    ret = gst_v4l2_buffer_pool_process (pool, buf_v4l2);
 
   } while (ret == GST_V4L2_FLOW_CORRUPTED_BUFFER);
 

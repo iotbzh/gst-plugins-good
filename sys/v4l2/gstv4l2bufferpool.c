@@ -45,6 +45,10 @@
 #include "gstv4l2object.h"
 #include "gst/gst-i18n-plugin.h"
 #include <gst/glib-compat-private.h>
+#ifdef HAVE_MMNGRBUF
+#include "mmngr_buf_user_public.h"
+#include <unistd.h>             /* getpagesize() */
+#endif
 
 GST_DEBUG_CATEGORY_STATIC (v4l2bufferpool_debug);
 GST_DEBUG_CATEGORY_STATIC (CAT_PERFORMANCE);
@@ -58,6 +62,11 @@ GST_DEBUG_CATEGORY_STATIC (CAT_PERFORMANCE);
  */
 #define gst_v4l2_buffer_pool_parent_class parent_class
 G_DEFINE_TYPE (GstV4l2BufferPool, gst_v4l2_buffer_pool, GST_TYPE_BUFFER_POOL);
+#ifdef HAVE_MMNGRBUF
+#define gst_v4l2_mmngr_buffer_pool_parent_class mmngr_parent_class
+G_DEFINE_TYPE (GstV4l2MmngrBufferPool, gst_v4l2_mmngr_buffer_pool,
+    GST_TYPE_V4L2_BUFFER_POOL);
+#endif
 
 enum _GstV4l2BufferPoolAcquireFlags
 {
@@ -724,6 +733,18 @@ gst_v4l2_buffer_pool_streamoff (GstV4l2BufferPool * pool)
         gst_v4l2_buffer_pool_release_buffer (bpool, buffer);
       else                      /* Don't re-enqueue capture buffer on stop */
         pclass->release_buffer (bpool, buffer);
+
+#ifdef HAVE_MMNGRBUF
+      if (GST_IS_V4L2_MMNGR_BUFFER_POOL (pool)) {
+        GstV4l2MmngrBufferPool *mpool = GST_V4L2_MMNGR_BUFFER_POOL_CAST (pool);
+        GstBuffer *mmngr_buf =
+            g_array_index (mpool->mmngr_bufs, GstBuffer *, i);
+
+        /* free mmngr buffer */
+        mmngr_export_end_in_user_ext (g_array_index (mpool->mmngr_id, gint, i));
+        gst_buffer_unref (mmngr_buf);
+      }
+#endif
 
       g_atomic_int_add (&pool->num_queued, -1);
     }
@@ -1614,6 +1635,242 @@ gst_v4l2_buffer_pool_finalize (GObject * object)
   G_OBJECT_CLASS (parent_class)->finalize (object);
 }
 
+#ifdef HAVE_MMNGRBUF
+static GstBuffer *
+gst_v4l2_buffer_pool_create_dmabuf (GstV4l2MmngrBufferPool * mpool, gint v4l2fd,
+    GstVideoInfo * info)
+{
+  GstV4l2BufferPool *pool = GST_V4L2_BUFFER_POOL (mpool);
+  GstMemory *wa_mem[GST_VIDEO_MAX_PLANES];
+  gint plane_size[GST_VIDEO_MAX_PLANES];
+  gint plane_size_ext[GST_VIDEO_MAX_PLANES];
+  gint page_offset[GST_VIDEO_MAX_PLANES];
+  gint offset[GST_VIDEO_MAX_PLANES] = { 0, };
+  gint exportfd[GST_VIDEO_MAX_PLANES];
+  gint exportid[GST_VIDEO_MAX_PLANES];
+  gint ret;
+  guint phys_addr;
+  gint importid;
+  gsize v4l2memsize;
+  gint i;
+  gint page_size;
+  GstBuffer *mmngrbuf;
+
+  /* Got top of Y plane's address from v4l2fd */
+  ret =
+      mmngr_import_start_in_user_ext (&importid, &v4l2memsize,
+      &phys_addr, v4l2fd, NULL);
+  if (ret != R_MM_OK) {
+    GST_ERROR_OBJECT (mpool, "Fail to import v4l2 dmabuf fd");
+    return NULL;
+  }
+
+  GST_DEBUG_OBJECT (mpool,
+      "Got top of Y plane's address 0x%08x from v4l2 dmabuf fd %d",
+      phys_addr, v4l2fd);
+
+  /* Create a workaround buffer that contain 2 mem represent for 2
+   * dmabuf fd of Y plane and UV plane with sizes are aligned for
+   * page size*/
+
+  switch (GST_VIDEO_INFO_FORMAT (info)) {
+    case GST_VIDEO_FORMAT_NV12:
+      plane_size[0] = info->stride[0] * info->height;
+      plane_size[1] = plane_size[0] / 2;
+      offset[1] = offset[0] + plane_size[0];
+      break;
+    case GST_VIDEO_FORMAT_NV16:
+      plane_size[0] = plane_size[1] = info->stride[0] * info->height;
+      offset[1] = offset[0] + plane_size[0];
+      break;
+    default:
+      GST_DEBUG_OBJECT (mpool, "Not handle now");
+      break;
+  }
+
+  page_size = getpagesize ();
+  mmngrbuf = gst_buffer_new ();
+
+  for (i = 0; i < GST_VIDEO_INFO_N_PLANES (info); i++) {
+    phys_addr = phys_addr + offset[i];
+    page_offset[i] = phys_addr & (page_size - 1);
+    plane_size_ext[i] = GST_ROUND_UP_N (plane_size[i] + page_offset[i],
+        page_size);
+    ret =
+        mmngr_export_start_in_user_ext (&exportid[i],
+        (gsize) plane_size_ext[i], phys_addr, &exportfd[i], NULL);
+    if (ret != R_MM_OK) {
+      GST_ERROR_OBJECT (mpool,
+          "mmngr_export_start_in_user failed (phys_addr:0x%08x)", phys_addr);
+      return NULL;
+    }
+    /* Record mmngrid */
+    g_array_append_val (mpool->mmngr_id, exportid[i]);
+
+    wa_mem[i] = gst_dmabuf_allocator_alloc (pool->allocator, exportfd[i],
+        plane_size_ext[i]);
+    wa_mem[i]->offset = page_offset[i];
+    wa_mem[i]->size = plane_size[i];
+
+    gst_buffer_append_memory (mmngrbuf, wa_mem[i]);
+  }
+
+  mmngr_import_end_in_user_ext (importid);
+
+  return mmngrbuf;
+}
+
+static gboolean
+replace_output_buffer (GstBuffer ** buffer, GstV4l2MmngrBufferPool * mpool,
+    guint index)
+{
+  GstBuffer *mmngrbuf = NULL;
+
+  g_return_val_if_fail (mpool->mmngr_bufs->len > index, GST_FLOW_ERROR);
+
+  mmngrbuf = g_array_index (mpool->mmngr_bufs, GstBuffer *, index);
+
+  /* Replace v4l2 buffer by workaround buffer to send multi-plane for donwstream */
+  if (mmngrbuf) {
+    gst_buffer_copy_into (mmngrbuf, *buffer, GST_BUFFER_COPY_METADATA, 0, -1);
+    *buffer = mmngrbuf;
+  } else {
+    GST_ERROR_OBJECT (mpool, "Can not get workaround buffer");
+    return FALSE;
+  }
+
+  return TRUE;
+}
+
+static void
+gst_v4l2_mmngr_buffer_pool_release_buffer (GstBufferPool * bpool,
+    GstBuffer * buffer)
+{
+  GstParentBufferMeta *meta;
+
+  meta = gst_buffer_get_parent_buffer_meta (buffer);
+  if (!meta) {
+    GST_DEBUG_OBJECT (bpool, "Fail to get parent buffer of %p", buffer);
+    return;
+  }
+
+  GST_BUFFER_POOL_CLASS (mmngr_parent_class)->release_buffer (bpool, meta->buffer);
+
+  meta->buffer->pool = NULL;
+}
+
+static GstFlowReturn
+gst_v4l2_mmngr_buffer_pool_alloc_buffer (GstBufferPool * bpool,
+    GstBuffer ** buffer, GstBufferPoolAcquireParams * params)
+{
+  GstFlowReturn ret;
+  GstV4l2MemoryGroup *group = NULL;
+  GstBuffer *mmngrbuf;
+  gint fd;
+  GstV4l2BufferPool *vpool = GST_V4L2_BUFFER_POOL (bpool);
+  GstV4l2MmngrBufferPool *mpool = GST_V4L2_MMNGR_BUFFER_POOL (bpool);
+  GstVideoInfo *info;
+
+  ret = GST_BUFFER_POOL_CLASS (mmngr_parent_class)->alloc_buffer (bpool,
+      buffer, params);
+  if (ret != GST_FLOW_OK)
+    return ret;
+
+  GST_BUFFER_FLAG_UNSET (*buffer, GST_BUFFER_FLAG_TAG_MEMORY);
+
+  if (!gst_v4l2_is_buffer_valid (*buffer, &group))
+    return GST_FLOW_ERROR;
+
+  /* V4L2_BUF_TYPE_VIDEO_CAPTURE always have 1 mem */
+  fd = gst_dmabuf_memory_get_fd (group->mem[0]);
+  info = &vpool->obj->info;
+
+  mmngrbuf = gst_v4l2_buffer_pool_create_dmabuf (mpool, fd, info);
+  if (mmngrbuf)
+    g_array_insert_val (mpool->mmngr_bufs, group->buffer.index, mmngrbuf);
+  else
+    return GST_FLOW_ERROR;
+
+  gst_buffer_add_parent_buffer_meta (mmngrbuf, *buffer);
+
+  *buffer = mmngrbuf;
+
+  return GST_FLOW_OK;
+}
+
+static GstFlowReturn
+gst_v4l2_mmngr_buffer_pool_acquire_buffer (GstBufferPool * bpool,
+    GstBuffer ** buffer, GstBufferPoolAcquireParams * params)
+{
+  GstV4l2MmngrBufferPool *mpool = GST_V4L2_MMNGR_BUFFER_POOL (bpool);
+  GstFlowReturn ret = GST_FLOW_OK;
+  GstV4l2MemoryGroup *group = NULL;
+  guint index, len;
+
+  ret = GST_BUFFER_POOL_CLASS (mmngr_parent_class)->acquire_buffer (bpool,
+      buffer, params);
+  if (ret != GST_FLOW_OK)
+    return ret;
+
+  if (!gst_v4l2_is_buffer_valid (*buffer, &group))
+    return GST_FLOW_ERROR;
+
+  (*buffer)->pool = bpool;
+
+  index = group->buffer.index;
+  len = mpool->mmngr_bufs->len;
+  if (index >= len || !g_array_index (mpool->mmngr_bufs, GstBuffer *, index))
+    return GST_FLOW_ERROR;
+
+  if (!replace_output_buffer (buffer, mpool, index))
+    return GST_FLOW_ERROR;
+
+  return ret;
+}
+
+static void
+gst_v4l2_mmngr_buffer_pool_init (GstV4l2MmngrBufferPool * pool)
+{
+  pool->mmngr_bufs = g_array_new (FALSE, TRUE, sizeof (GstBufferPool *));
+  pool->mmngr_id = g_array_new (FALSE, FALSE, sizeof (gint));
+}
+
+static void
+gst_v4l2_mmngr_buffer_pool_finalize (GObject * object)
+{
+  GstV4l2MmngrBufferPool *pool = GST_V4L2_MMNGR_BUFFER_POOL (object);
+
+  if (pool->mmngr_id) {
+    g_array_free (pool->mmngr_id, TRUE);
+    pool->mmngr_id = NULL;
+  }
+
+  if (pool->mmngr_bufs) {
+    g_array_free (pool->mmngr_bufs, TRUE);
+    pool->mmngr_bufs = NULL;
+  }
+
+  G_OBJECT_CLASS (mmngr_parent_class)->finalize (object);
+}
+
+static void
+gst_v4l2_mmngr_buffer_pool_class_init (GstV4l2MmngrBufferPoolClass * klass)
+{
+  GObjectClass *object_class = G_OBJECT_CLASS (klass);
+  GstBufferPoolClass *bufferpool_class = GST_BUFFER_POOL_CLASS (klass);
+
+  object_class->finalize = gst_v4l2_mmngr_buffer_pool_finalize;
+
+  bufferpool_class->alloc_buffer = gst_v4l2_mmngr_buffer_pool_alloc_buffer;
+  bufferpool_class->acquire_buffer = gst_v4l2_mmngr_buffer_pool_acquire_buffer;
+  bufferpool_class->release_buffer = gst_v4l2_mmngr_buffer_pool_release_buffer;
+
+  GST_DEBUG_CATEGORY_INIT (v4l2bufferpool_debug, "v4l2mmngrbufferpool", 0,
+      "V4L2 Mmngr Buffer Pool");
+  GST_DEBUG_CATEGORY_GET (CAT_PERFORMANCE, "GST_PERFORMANCE");
+}
+#endif
+
 static void
 gst_v4l2_buffer_pool_init (GstV4l2BufferPool * pool)
 {
@@ -1658,7 +1915,7 @@ gst_v4l2_buffer_pool_class_init (GstV4l2BufferPoolClass * klass)
 GstBufferPool *
 gst_v4l2_buffer_pool_new (GstV4l2Object * obj, GstCaps * caps)
 {
-  GstV4l2BufferPool *pool;
+  GstV4l2BufferPool *pool = NULL;
   GstStructure *config;
   gchar *name, *parent_name;
   gint fd;
@@ -1673,8 +1930,16 @@ gst_v4l2_buffer_pool_new (GstV4l2Object * obj, GstCaps * caps)
       V4L2_TYPE_IS_OUTPUT (obj->type) ? "sink" : "src", NULL);
   g_free (parent_name);
 
-  pool = (GstV4l2BufferPool *) g_object_new (GST_TYPE_V4L2_BUFFER_POOL,
-      "name", name, NULL);
+#ifdef HAVE_MMNGRBUF
+  if (obj->mode == GST_V4L2_IO_DMABUF &&
+      (GST_VIDEO_INFO_FORMAT (&obj->info) == GST_VIDEO_FORMAT_NV12 ||
+          GST_VIDEO_INFO_FORMAT (&obj->info) == GST_VIDEO_FORMAT_NV16))
+    pool = (GstV4l2BufferPool *) g_object_new (GST_TYPE_V4L2_MMNGR_BUFFER_POOL,
+        "name", "mmngrpool", NULL);
+#endif
+  if (!pool)
+    pool = (GstV4l2BufferPool *) g_object_new (GST_TYPE_V4L2_BUFFER_POOL,
+        "name", name, NULL);
   g_object_ref_sink (pool);
   g_free (name);
 
