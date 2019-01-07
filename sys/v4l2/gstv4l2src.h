@@ -2,6 +2,7 @@
  *
  * Copyright (C) 2001-2002 Ronald Bultje <rbultje@ronald.bitfreak.net>
  *               2006 Edgard Lima <edgard.lima@gmail.com>
+ * Copyright (C) 2017, Renesas Electronics Corporation
  *
  * gstv4l2src.h: BT8x8/V4L2 source element
  *
@@ -61,6 +62,7 @@ struct _GstV4l2Src
   guint64 renegotiation_adjust;
 
   GstClockTime ctrl_time;
+  struct v4l2_rect in_size;
 
   gboolean pending_set_fmt;
 

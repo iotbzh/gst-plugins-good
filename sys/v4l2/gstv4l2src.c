@@ -2,6 +2,7 @@
  *
  * Copyright (C) 2001-2002 Ronald Bultje <rbultje@ronald.bitfreak.net>
  *               2006 Edgard Lima <edgard.lima@gmail.com>
+ * Copyright (C) 2017, Renesas Electronics Corporation
  *
  * gstv4l2src.c: Video4Linux2 source element
  *
@@ -389,6 +390,26 @@ gst_v4l2src_set_format (GstV4l2Src * v4l2src, GstCaps * caps,
   return gst_v4l2_object_set_format (obj, caps, error);
 }
 
+static gboolean
+gst_v4l2src_get_input_size_info (GstV4l2Src * src)
+{
+  GstV4l2Object *obj;
+  struct v4l2_cropcap cropcap = { 0 };
+
+  obj = src->v4l2object;
+
+  /* Currently, get information of input resolution through cropcap callback */
+  cropcap.type = obj->type;
+  if (obj->ioctl (src->v4l2object->video_fd, VIDIOC_CROPCAP, &cropcap) < 0) {
+    GST_ERROR_OBJECT (src, "Cropcap fail, CROPCAP has not supported");
+    return FALSE;
+  }
+  src->in_size.width = cropcap.defrect.width;
+  src->in_size.height = cropcap.defrect.height;
+
+  return TRUE;
+}
+
 static GstCaps *
 gst_v4l2src_fixate (GstBaseSrc * basesrc, GstCaps * caps, GstStructure * pref_s)
 {
@@ -403,9 +424,15 @@ gst_v4l2src_fixate (GstBaseSrc * basesrc, GstCaps * caps, GstStructure * pref_s)
   gint i = G_MAXINT;
   GstV4l2Error error = GST_V4L2_ERROR_INIT;
   GstCaps *fcaps = NULL;
+  gboolean ret;
 
   GST_DEBUG_OBJECT (basesrc, "fixating caps %" GST_PTR_FORMAT, caps);
 
+  ret = gst_v4l2src_get_input_size_info (v4l2src);
+  if (ret) {
+    pref.width = v4l2src->in_size.width;
+    pref.height = v4l2src->in_size.height;
+  }
   /* We consider the first structure from peercaps to be a preference. This is
    * useful for matching a reported native display, or simply to avoid
    * transformation to happen downstream. */
