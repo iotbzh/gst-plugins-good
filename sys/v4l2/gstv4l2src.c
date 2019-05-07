@@ -2,7 +2,7 @@
  *
  * Copyright (C) 2001-2002 Ronald Bultje <rbultje@ronald.bitfreak.net>
  *               2006 Edgard Lima <edgard.lima@gmail.com>
- * Copyright (C) 2017, Renesas Electronics Corporation
+ * Copyright (C) 2019, Renesas Electronics Corporation
  *
  * gstv4l2src.c: Video4Linux2 source element
  *
@@ -68,6 +68,7 @@ GST_DEBUG_CATEGORY (v4l2src_debug);
 #define GST_CAT_DEFAULT v4l2src_debug
 
 #define DEFAULT_PROP_DEVICE   "/dev/video0"
+#define DEFAULT_NUM_ALLOC_BUF   (0xffffffff)
 
 enum
 {
@@ -77,7 +78,8 @@ enum
   PROP_CROP_TOP,
   PROP_CROP_LEFT,
   PROP_CROP_WIDTH,
-  PROP_CROP_HEIGHT
+  PROP_CROP_HEIGHT,
+  PROP_NUM_ALLOC_BUF
 };
 
 /* signals and args */
@@ -172,6 +174,13 @@ gst_v4l2src_class_init (GstV4l2SrcClass * klass)
       g_param_spec_int ("crop-height", "Height size",
           "Height of the CROP area. 0: Equal with input height",
           0, G_MAXINT, 0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_NUM_ALLOC_BUF,
+      g_param_spec_uint ("num-alloc-buffer",
+          "Number of buffer request to driver",
+          "Number of buffers will allocate (support for mmap and dmabuf io-mode)"
+          "If the number is out of support of driver, it will be adjusted (0xffffffff=auto)",
+          GST_V4L2_MIN_BUFFERS, G_MAXUINT, DEFAULT_NUM_ALLOC_BUF,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   /**
    * GstV4l2Src::prepare-format:
@@ -231,6 +240,8 @@ gst_v4l2src_init (GstV4l2Src * v4l2src)
 
   gst_base_src_set_format (GST_BASE_SRC (v4l2src), GST_FORMAT_TIME);
   gst_base_src_set_live (GST_BASE_SRC (v4l2src), TRUE);
+
+  v4l2src->num_alloc_buffer = DEFAULT_NUM_ALLOC_BUF;
 }
 
 
@@ -264,6 +275,9 @@ gst_v4l2src_set_property (GObject * object,
       case PROP_CROP_HEIGHT:
         v4l2src->crop.height = g_value_get_int (value);
         break;
+      case PROP_NUM_ALLOC_BUF:
+        v4l2src->num_alloc_buffer = g_value_get_uint (value);
+        break;
       default:
         G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
         break;
@@ -291,6 +305,9 @@ gst_v4l2src_get_property (GObject * object,
         break;
       case PROP_CROP_HEIGHT:
         g_value_set_int (value, v4l2src->crop.height);
+        break;
+      case PROP_NUM_ALLOC_BUF:
+        g_value_set_uint (value, v4l2src->num_alloc_buffer);
         break;
       default:
         G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
