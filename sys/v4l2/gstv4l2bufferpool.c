@@ -1698,7 +1698,8 @@ gst_v4l2_buffer_pool_create_dmabuf (GstV4l2MmngrBufferPool * mpool, gint v4l2fd,
         page_size);
     ret =
         mmngr_export_start_in_user_ext (&exportid[i],
-        (gsize) plane_size_ext[i], phys_addr, &exportfd[i], NULL);
+        (gsize) plane_size_ext[i], GST_ROUND_DOWN_N (phys_addr, page_size),
+        &exportfd[i], NULL);
     if (ret != R_MM_OK) {
       GST_ERROR_OBJECT (mpool,
           "mmngr_export_start_in_user failed (phys_addr:0x%08x)", phys_addr);
