@@ -1746,17 +1746,18 @@ static void
 gst_v4l2_mmngr_buffer_pool_release_buffer (GstBufferPool * bpool,
     GstBuffer * buffer)
 {
-  GstParentBufferMeta *meta;
+  GstBuffer *pbuf;
 
-  meta = gst_buffer_get_parent_buffer_meta (buffer);
-  if (!meta) {
-    GST_DEBUG_OBJECT (bpool, "Fail to get parent buffer of %p", buffer);
+  pbuf = gst_mini_object_get_qdata (GST_MINI_OBJECT (buffer),
+      GST_V4L2_MMNGR_EXPORT_QUARK);
+  if (!pbuf) {
+    GST_DEBUG_OBJECT (bpool, "Cannot get parent buffer of %p", buffer);
     return;
   }
 
-  GST_BUFFER_POOL_CLASS (mmngr_parent_class)->release_buffer (bpool, meta->buffer);
+  GST_BUFFER_POOL_CLASS (mmngr_parent_class)->release_buffer (bpool, pbuf);
 
-  meta->buffer->pool = NULL;
+  pbuf->pool = NULL;
 }
 
 static GstFlowReturn
@@ -1791,7 +1792,8 @@ gst_v4l2_mmngr_buffer_pool_alloc_buffer (GstBufferPool * bpool,
   else
     return GST_FLOW_ERROR;
 
-  gst_buffer_add_parent_buffer_meta (mmngrbuf, *buffer);
+  gst_mini_object_set_qdata (GST_MINI_OBJECT (mmngrbuf),
+      GST_V4L2_MMNGR_EXPORT_QUARK, *buffer, NULL);
 
   *buffer = mmngrbuf;
 

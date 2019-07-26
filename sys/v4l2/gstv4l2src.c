@@ -943,6 +943,9 @@ gst_v4l2src_create (GstPushSrc * src, GstBuffer ** buf)
   GstClockTime delay;
   GstMessage *qos_msg;
   GstBuffer **buf_v4l2 = buf;
+#ifdef HAVE_MMNGRBUF
+  GstBuffer *pbuf = NULL;
+#endif
 
   do {
     ret = GST_BASE_SRC_CLASS (parent_class)->alloc (GST_BASE_SRC (src), 0,
@@ -953,13 +956,12 @@ gst_v4l2src_create (GstPushSrc * src, GstBuffer ** buf)
 
 #ifdef HAVE_MMNGRBUF
     if (GST_IS_V4L2_MMNGR_BUFFER_POOL (obj->pool)) {
-      GstParentBufferMeta *meta;
-
-      meta = gst_buffer_get_parent_buffer_meta (*buf);
-      if (!meta)
+      pbuf = gst_mini_object_get_qdata (GST_MINI_OBJECT (*buf),
+          GST_V4L2_MMNGR_EXPORT_QUARK);
+      if (!pbuf)
         goto alloc_failed;
 
-      buf_v4l2 = &meta->buffer;
+      buf_v4l2 = &pbuf;
     }
 #endif
 

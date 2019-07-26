@@ -47,6 +47,7 @@ G_BEGIN_DECLS
 #define GST_IS_V4L2_MMNGR_BUFFER_POOL(obj)   (G_TYPE_CHECK_INSTANCE_TYPE ((obj), GST_TYPE_V4L2_MMNGR_BUFFER_POOL))
 #define GST_V4L2_MMNGR_BUFFER_POOL(obj)      (G_TYPE_CHECK_INSTANCE_CAST ((obj), GST_TYPE_V4L2_MMNGR_BUFFER_POOL, GstV4l2MmngrBufferPool))
 #define GST_V4L2_MMNGR_BUFFER_POOL_CAST(obj) ((GstV4l2MmngrBufferPool*)(obj))
+#define GST_V4L2_MMNGR_EXPORT_QUARK          (g_quark_from_string ("GstV4l2MmngrBufferPoolParentBufferData"))
 #endif
 
 #define GST_TYPE_V4L2_BUFFER_POOL      (gst_v4l2_buffer_pool_get_type())
